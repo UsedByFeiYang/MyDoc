@@ -17,8 +17,6 @@ The script widens the race window by:
 Use this on an isolated environment first.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -27,7 +25,6 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from typing import List, Optional, Sequence, TextIO
 
 
@@ -49,15 +46,15 @@ def sql_ident(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
 
-@dataclass
 class MysqlTarget:
-    mysql_bin: str
-    host: Optional[str]
-    port: int
-    user: str
-    password: Optional[str]
-    socket: Optional[str]
-    database: str
+    def __init__(self, mysql_bin, host, port, user, password, socket, database):
+        self.mysql_bin = mysql_bin
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.socket = socket
+        self.database = database
 
     def command(self) -> List[str]:
         cmd = [
@@ -78,15 +75,16 @@ class MysqlTarget:
             cmd.extend(["--protocol=TCP", "--host", self.host or "127.0.0.1", "--port", str(self.port)])
         return cmd
 
-    def run_sql(self, sql: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_sql(self, sql: str, check: bool = True):
         env = os.environ.copy()
         if self.password is not None:
             env["MYSQL_PWD"] = self.password
         result = subprocess.run(
             self.command(),
             input=sql,
-            text=True,
-            capture_output=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
             check=False,
         )
