@@ -1,0 +1,140 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--disable_query_log
+call mtr.add_suppression("\\[ERROR\\] .*Index PRIMARY is corrupted");
+call mtr.add_suppression(".*We detected index corruption in an InnoDB index.*");
+--enable_query_log
+
+--echo #
+--echo # Bug#108396 ONLINE ADD PRIMARY KEY CAN FAIL WITH ER_INDEX_CORRUPT
+--echo #           AFTER CONCURRENT UPDATE ON BLOB + VIRTUAL COLUMN TABLE
+--echo #
+
+CREATE TABLE e1 (
+  a INT,
+  b INT,
+  c BLOB,
+  d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+  KEY id(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+
+INSERT INTO e1 VALUES
+  (1, 1,
+   REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281),
+   DEFAULT);
+
+connect (con1,localhost,root,,);
+
+connection con1;
+SET DEBUG_SYNC =
+  'innodb_inplace_alter_table_enter SIGNAL start_create WAIT_FOR go_ahead';
+send ALTER TABLE e1 ADD PRIMARY KEY(a), ALGORITHM=INPLACE;
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+UPDATE e1 SET b = 2;
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+
+connection con1;
+--error ER_INDEX_CORRUPT
+reap;
+
+connection default;
+disconnect con1;
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e1;
+
+--echo #
+--echo # Equivalent concurrent write via INSERT ... ON DUPLICATE KEY UPDATE
+--echo #
+
+CREATE TABLE e2 (
+  a INT,
+  b INT,
+  c BLOB,
+  d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+  UNIQUE KEY uk_a(a),
+  KEY id(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+
+INSERT INTO e2 VALUES
+  (1, 1,
+   REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281),
+   DEFAULT);
+
+connect (con2,localhost,root,,);
+
+connection con2;
+SET DEBUG_SYNC =
+  'innodb_inplace_alter_table_enter SIGNAL start_create_iodku WAIT_FOR go_ahead_iodku';
+send ALTER TABLE e2 ADD PRIMARY KEY(a), ALGORITHM=INPLACE;
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create_iodku';
+INSERT INTO e2(a, b, c) VALUES
+  (1, 2,
+   REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281))
+ON DUPLICATE KEY UPDATE b = 2;
+SET DEBUG_SYNC = 'now SIGNAL go_ahead_iodku';
+
+connection con2;
+--error ER_INDEX_CORRUPT
+reap;
+
+connection default;
+disconnect con2;
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e2;
+
+--echo #
+--echo # Equivalent concurrent write during OPTIMIZE TABLE on a PK table
+--echo #
+
+CREATE TABLE e3 (
+  id INT PRIMARY KEY,
+  a INT,
+  b INT,
+  c BLOB,
+  d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+  KEY id_d(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+
+INSERT INTO e3(id, a, b, c) VALUES
+  (10, 1, 1,
+   REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281));
+
+connect (con3,localhost,root,,);
+connect (con4,localhost,root,,);
+
+connection con3;
+SET DEBUG_SYNC =
+  'innodb_inplace_alter_table_enter SIGNAL start_enter_opt WAIT_FOR go_enter_opt';
+send OPTIMIZE TABLE e3;
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR start_enter_opt';
+
+connection con4;
+send INSERT INTO e3(id, a, b, c) VALUES
+  (10, 1, 2,
+   REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281))
+ON DUPLICATE KEY UPDATE b = 2;
+
+connection default;
+SET DEBUG_SYNC = 'now SIGNAL go_enter_opt';
+
+connection con4;
+reap;
+
+connection con3;
+reap;
+
+connection default;
+disconnect con4;
+disconnect con3;
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e3;
+
+--source include/wait_until_count_sessions.inc

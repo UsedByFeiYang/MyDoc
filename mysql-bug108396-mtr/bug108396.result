@@ -1,0 +1,82 @@
+#
+# Bug#108396 ONLINE ADD PRIMARY KEY CAN FAIL WITH ER_INDEX_CORRUPT
+#           AFTER CONCURRENT UPDATE ON BLOB + VIRTUAL COLUMN TABLE
+#
+CREATE TABLE e1 (
+a INT,
+b INT,
+c BLOB,
+d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+KEY id(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+INSERT INTO e1 VALUES
+(1, 1,
+REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281),
+DEFAULT);
+SET DEBUG_SYNC =
+'innodb_inplace_alter_table_enter SIGNAL start_create WAIT_FOR go_ahead';
+ALTER TABLE e1 ADD PRIMARY KEY(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create';
+UPDATE e1 SET b = 2;
+SET DEBUG_SYNC = 'now SIGNAL go_ahead';
+ERROR HY000: Index PRIMARY is corrupted
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e1;
+#
+# Equivalent concurrent write via INSERT ... ON DUPLICATE KEY UPDATE
+#
+CREATE TABLE e2 (
+a INT,
+b INT,
+c BLOB,
+d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+UNIQUE KEY uk_a(a),
+KEY id(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+INSERT INTO e2 VALUES
+(1, 1,
+REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281),
+DEFAULT);
+SET DEBUG_SYNC =
+'innodb_inplace_alter_table_enter SIGNAL start_create_iodku WAIT_FOR go_ahead_iodku';
+ALTER TABLE e2 ADD PRIMARY KEY(a), ALGORITHM=INPLACE;
+SET DEBUG_SYNC = 'now WAIT_FOR start_create_iodku';
+INSERT INTO e2(a, b, c) VALUES
+(1, 2,
+REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281))
+ON DUPLICATE KEY UPDATE b = 2;
+SET DEBUG_SYNC = 'now SIGNAL go_ahead_iodku';
+ERROR HY000: Index PRIMARY is corrupted
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e2;
+#
+# Equivalent concurrent write during OPTIMIZE TABLE on a PK table
+#
+CREATE TABLE e3 (
+id INT PRIMARY KEY,
+a INT,
+b INT,
+c BLOB,
+d INT GENERATED ALWAYS AS (a + 1) VIRTUAL,
+KEY id_d(d)
+) ENGINE=InnoDB ROW_FORMAT=REDUNDANT;
+INSERT INTO e3(id, a, b, c) VALUES
+(10, 1, 1,
+REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281));
+SET DEBUG_SYNC =
+'innodb_inplace_alter_table_enter SIGNAL start_enter_opt WAIT_FOR go_enter_opt';
+OPTIMIZE TABLE e3;
+SET DEBUG_SYNC = 'now WAIT_FOR start_enter_opt';
+INSERT INTO e3(id, a, b, c) VALUES
+(10, 1, 2,
+REPEAT('rocalrulcrcaurcuccoolrouuocacaooaucauualcucuoucucclolcllloocuarcoorlaccarocouuaoorcolloucraoaaooc', 281))
+ON DUPLICATE KEY UPDATE b = 2;
+SET DEBUG_SYNC = 'now SIGNAL go_enter_opt';
+Table	Op	Msg_type	Msg_text
+test.e3	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.e3	optimize	error	Index PRIMARY is corrupted
+test.e3	optimize	status	Operation failed
+Warnings:
+Error	1712	Index PRIMARY is corrupted
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE e3;
