@@ -1,0 +1,286 @@
+From dbc00fbd4c51bbb60cef9e108ae6d3ea44b1df57 Mon Sep 17 00:00:00 2001
+From: Developer <developer@example.com>
+Date: Fri, 24 Apr 2026 15:47:38 +0800
+Subject: [PATCH 1/2] Fix -Werror=cast-qual errors in mysys/hash.cc
+
+Remove C-style casts that stripped const qualifiers:
+- my_hash_sort: drop redundant (uchar*) on const uchar* key
+- my_hash_key: return const uchar* instead of char*; remove internal casts
+- rec_hashnr, hashcmp, my_hash_insert, my_hash_update, my_hash_check:
+  update local variables to const uchar* to match new my_hash_key return type
+- my_hash_insert line 463: use const_cast<uchar*> to document intentional
+  const-stripping when storing inserted record pointer in HASH_LINK::data
+---
+ mysys/hash.cc | 31 +++++++++++++++----------------
+ 1 file changed, 15 insertions(+), 16 deletions(-)
+
+diff --git a/mysys/hash.cc b/mysys/hash.cc
+index 3ac66e736ce..68e3bbcd47c 100644
+--- a/mysys/hash.cc
++++ b/mysys/hash.cc
+@@ -45,7 +45,7 @@ static int hashcmp(const HASH *hash, HASH_LINK *pos, const uchar *key,
+ my_hash_value_type my_hash_sort(CHARSET_INFO *cs, const uchar *key,
+                                 size_t length) {
+   ulong nr1 = 1, nr2 = 4;
+-  my_ci_hash_sort(cs, (uchar *)key, length, &nr1, &nr2);
++  my_ci_hash_sort(cs, key, length, &nr1, &nr2);
+   return (my_hash_value_type)nr1;
+ }
+ 
+@@ -176,11 +176,11 @@ void my_hash_reset(HASH *hash) {
+   handle inline functions that are not defined as native types
+ */
+ 
+-static inline char *my_hash_key(const HASH *hash, const uchar *record,
+-                                size_t *length, my_bool first) {
+-  if (hash->get_key) return (char *)(*hash->get_key)(record, length, first);
++static inline const uchar *my_hash_key(const HASH *hash, const uchar *record,
++                                       size_t *length, my_bool first) {
++  if (hash->get_key) return (*hash->get_key)(record, length, first);
+   *length = hash->key_length;
+-  return (char *)record + hash->key_offset;
++  return record + hash->key_offset;
+ }
+ 
+ /* Calculate pos according to keys */
+@@ -205,7 +205,7 @@ static
+     my_hash_value_type
+     rec_hashnr(HASH *hash, const uchar *record) {
+   size_t length;
+-  uchar *key = (uchar *)my_hash_key(hash, record, &length, 0);
++  const uchar *key = my_hash_key(hash, record, &length, 0);
+   return hash->hash_function(hash->charset, key, length);
+ }
+ 
+@@ -332,10 +332,8 @@ static void movelink(HASH_LINK *array, uint find, uint next_link,
+ static int hashcmp(const HASH *hash, HASH_LINK *pos, const uchar *key,
+                    size_t length) {
+   size_t rec_keylength;
+-  uchar *rec_key;
+-  rec_key = (uchar *)my_hash_key(hash, pos->data, &rec_keylength, 1);
+-  return my_strnncoll(hash->charset, (uchar *)rec_key, rec_keylength,
+-                      (uchar *)key, length);
++  const uchar *rec_key = my_hash_key(hash, pos->data, &rec_keylength, 1);
++  return my_strnncoll(hash->charset, rec_key, rec_keylength, key, length);
+ }
+ 
+ /**
+@@ -351,10 +349,11 @@ my_bool my_hash_insert(HASH *info, const uchar *record) {
+   size_t idx, halfbuff, first_index;
+   size_t length;
+   my_hash_value_type current_hash_nr, rec_hash_nr = 0, rec2_hash_nr = 0;
+-  uchar *rec_data = nullptr, *rec2_data = nullptr, *key;
++  uchar *rec_data = nullptr, *rec2_data = nullptr;
++  const uchar *key;
+   HASH_LINK *data, *empty, *gpos = nullptr, *gpos2 = nullptr, *pos;
+ 
+-  key = (uchar *)my_hash_key(info, record, &length, 1);
++  key = my_hash_key(info, record, &length, 1);
+   current_hash_nr = info->hash_function(info->charset, key, length);
+ 
+   if (info->flags & HASH_UNIQUE) {
+@@ -460,7 +459,7 @@ my_bool my_hash_insert(HASH *info, const uchar *record) {
+                (uint)(empty - data));
+     }
+   }
+-  pos->data = (uchar *)record;
++  pos->data = const_cast<uchar *>(record);
+   pos->hash_nr = current_hash_nr;
+   if (++info->records == info->blength) info->blength += info->blength;
+   return (0);
+@@ -572,10 +571,10 @@ my_bool my_hash_update(HASH *hash, uchar *record, uchar *old_key,
+   size_t length, empty, blength;
+   my_hash_value_type hash_nr;
+   HASH_LINK org_link, *data, *previous, *pos;
+-  uchar *new_key;
++  const uchar *new_key;
+   DBUG_ENTER("my_hash_update");
+ 
+-  new_key = (uchar *)my_hash_key(hash, record, &length, 1);
++  new_key = my_hash_key(hash, record, &length, 1);
+   hash_nr = hash->hash_function(hash->charset, new_key, length);
+ 
+   if (HASH_UNIQUE & hash->flags) {
+@@ -724,7 +723,7 @@ my_bool my_hash_check(HASH *hash) {
+ 
+   for (i = found = max_links = seek = 0; i < records; i++) {
+     size_t length;
+-    uchar *key = (uchar *)my_hash_key(hash, data[i].data, &length, 0);
++    const uchar *key = my_hash_key(hash, data[i].data, &length, 0);
+     if (data[i].hash_nr != hash->hash_function(hash->charset, key, length)) {
+       DBUG_PRINT("error", ("record at %d has wrong hash", i));
+       error = 1;
+-- 
+2.43.0
+
+
+From 9dbb267e94e19f5c9fa88fdf731790d69f598073 Mon Sep 17 00:00:00 2001
+From: Developer <developer@example.com>
+Date: Fri, 24 Apr 2026 17:25:03 +0800
+Subject: [PATCH 2/2] Fix -Werror=cast-qual errors in vidx source files
+
+Remove C-style casts that stripped const qualifiers across all vidx files:
+- vidx_func.h: use static_cast<const Item_func*> for const Item* downcast
+- sql_queue.h: remove const from push/safe_push/replace_top params;
+  use reinterpret_cast/const_cast; fix queue_is_full in const method
+- vidx_hnsw.cc: FVector::data() add non-const overload, fix const overload;
+  FVector::create() const void* src -> const float*;
+  AVX2/AVX512 dot_product v1/v2 -> const __m256i*/const __m512i*;
+  String::ptr() result -> const uchar*; gref() use const_cast
+- bloom_filters.h: masks (const uint8_t[]) read via reinterpret_cast<const>
+- vidx_index.cc: const dd::Table* -> const_cast for options().remove()
+---
+ include/vidx/bloom_filters.h |  2 +-
+ include/vidx/sql_queue.h     | 16 ++++++++--------
+ include/vidx/vidx_func.h     |  2 +-
+ sql/vidx/vidx_hnsw.cc        | 19 +++++++++++--------
+ sql/vidx/vidx_index.cc       |  2 +-
+ 5 files changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/include/vidx/bloom_filters.h b/include/vidx/bloom_filters.h
+index 53381dab57f..a36a724059b 100644
+--- a/include/vidx/bloom_filters.h
++++ b/include/vidx/bloom_filters.h
+@@ -359,7 +359,7 @@ struct PatternedSimdBloomFilter {
+     uint64_t maskIdx = hash & maskIdxMask;
+     uint64_t maskByteIdx = maskIdx >> 3;
+     uint64_t maskBitIdx = maskIdx & 7;
+-    uint64_t rawMask = *(uint64_t *)(masks + maskByteIdx);
++    uint64_t rawMask = *reinterpret_cast<const uint64_t *>(masks + maskByteIdx);
+     uint64_t unrotated = (rawMask >> maskBitIdx) & maskMask;
+     uint64_t rotation = (hash >> mask_idx_bits) & ((1 << rotate_bits) - 1);
+     return rotation ? (unrotated << rotation) | (unrotated >> (64 - rotation))
+diff --git a/include/vidx/sql_queue.h b/include/vidx/sql_queue.h
+index c980235da5a..0cabc6b5616 100644
+--- a/include/vidx/sql_queue.h
++++ b/include/vidx/sql_queue.h
+@@ -56,27 +56,27 @@ class Queue {
+   int init(uint max_elements, bool max_at_top, queue_compare compare,
+            Param *param = 0) {
+     return init_queue(&m_queue, key_memory_vidx_mem, max_elements, 0,
+-                      max_at_top, compare, (void *)param);
++                      max_at_top, compare, static_cast<void *>(param));
+   }
+ 
+   size_t elements() const { return m_queue.elements; }
+   bool is_inited() const { return is_queue_inited(&m_queue); }
+-  bool is_full() const { return queue_is_full((QUEUE *)(&m_queue)); }
++  bool is_full() const { return queue_is_full(const_cast<QUEUE *>(&m_queue)); }
+   bool is_empty() const { return elements() == 0; }
+   Element *top() const { return (Element *)queue_top(&m_queue); }
+ 
+-  void push(const Element *element) {
+-    queue_insert(&m_queue, (uchar *)element);
++  void push(Element *element) {
++    queue_insert(&m_queue, reinterpret_cast<uchar *>(element));
+   }
+-  void safe_push(const Element *element) {
++  void safe_push(Element *element) {
+     if (is_full()) m_queue.elements--;  // remove one of the furthest elements
+-    queue_insert(&m_queue, (uchar *)element);
++    queue_insert(&m_queue, reinterpret_cast<uchar *>(element));
+   }
+   Element *pop() { return (Element *)queue_remove_top(&m_queue); }
+   void clear() { queue_remove_all(&m_queue); }
+   void propagate_top() { queue_replaced(&m_queue); }
+-  void replace_top(const Element *element) {
+-    queue_top(&m_queue) = (uchar *)element;
++  void replace_top(Element *element) {
++    queue_top(&m_queue) = reinterpret_cast<uchar *>(element);
+     propagate_top();
+   }
+ 
+diff --git a/include/vidx/vidx_func.h b/include/vidx/vidx_func.h
+index e5ac9625ef5..7244effd69e 100644
+--- a/include/vidx/vidx_func.h
++++ b/include/vidx/vidx_func.h
+@@ -125,7 +125,7 @@ class Item_func_vector_dim : public Item_int_func {
+ 
+ static inline bool check_item_func_vec_distance(const Item *item) {
+   return item->type() == Item::FUNC_ITEM &&
+-         ((Item_func *)item)->functype() == Item_func::VECTOR_DISTANCE_FUNC;
++         static_cast<const Item_func *>(item)->functype() == Item_func::VECTOR_DISTANCE_FUNC;
+ }
+ }  // namespace vidx
+ 
+diff --git a/sql/vidx/vidx_hnsw.cc b/sql/vidx/vidx_hnsw.cc
+index 00a751370de..614962b0ab0 100644
+--- a/sql/vidx/vidx_hnsw.cc
++++ b/sql/vidx/vidx_hnsw.cc
+@@ -81,7 +81,8 @@ struct FVector {
+   float abs2, scale;
+   int16_t dims[4];
+ 
+-  uchar *data() const { return (uchar *)(&scale); }
++  uchar *data() { return reinterpret_cast<uchar *>(&scale); }
++  const uchar *data() const { return reinterpret_cast<const uchar *>(&scale); }
+ 
+   static size_t data_size(size_t n) { return data_header + n * 2; }
+ 
+@@ -91,7 +92,8 @@ struct FVector {
+ 
+   static const FVector *create(distance_kind metric, void *mem, const void *src,
+                                size_t src_len) {
+-    float scale = 0, *v = (float *)src;
++    float scale = 0;
++    const float *v = reinterpret_cast<const float *>(src);
+     size_t vec_len = src_len / sizeof(float);
+     for (size_t i = 0; i < vec_len; i++)
+       scale = std::max(scale, std::abs(get_float(v + i)));
+@@ -130,8 +132,8 @@ struct FVector {
+       v8f v;
+       __m256 i;
+     } tmp;
+-    __m256i *p1 = (__m256i *)v1;
+-    __m256i *p2 = (__m256i *)v2;
++    const __m256i *p1 = reinterpret_cast<const __m256i *>(v1);
++    const __m256i *p2 = reinterpret_cast<const __m256i *>(v2);
+     v8f d = {0};
+     for (size_t i = 0; i < (len + AVX2_dims - 1) / AVX2_dims; p1++, p2++, i++) {
+       tmp.i = _mm256_cvtepi32_ps(_mm256_madd_epi16(*p1, *p2));
+@@ -164,8 +166,8 @@ struct FVector {
+ 
+   AVX512_IMPLEMENTATION
+   static float dot_product(const int16_t *v1, const int16_t *v2, size_t len) {
+-    __m512i *p1 = (__m512i *)v1;
+-    __m512i *p2 = (__m512i *)v2;
++    const __m512i *p1 = reinterpret_cast<const __m512i *>(v1);
++    const __m512i *p2 = reinterpret_cast<const __m512i *>(v2);
+     __m512 d = _mm512_setzero_ps();
+     for (size_t i = 0; i < (len + AVX512_dims - 1) / AVX512_dims;
+          p1++, p2++, i++)
+@@ -1089,7 +1091,8 @@ int FVectorNode::load_from_record(TABLE *graph) {
+   if (unlikely(!v)) return HA_ERR_CRASHED;
+ 
+   // <N> <gref> <gref> ... <N> ...etc...
+-  uchar *ptr = (uchar *)v->ptr(), *end = ptr + v->length();
++  const uchar *ptr = reinterpret_cast<const uchar *>(v->ptr());
++  const uchar *end = ptr + v->length();
+   for (size_t i = 0; i <= max_layer; i++) {
+     if (unlikely(ptr >= end)) return HA_ERR_CRASHED;
+     size_t grefs = *ptr++;
+@@ -1109,7 +1112,7 @@ void FVectorNode::push_neighbor(size_t layer, FVectorNode *other) {
+ 
+ size_t FVectorNode::tref_len() const { return ctx->tref_len; }
+ size_t FVectorNode::gref_len() const { return ctx->gref_len; }
+-uchar *FVectorNode::gref() const { return (uchar *)(this + 1); }
++uchar *FVectorNode::gref() const { return const_cast<uchar *>(reinterpret_cast<const uchar *>(this + 1)); }
+ uchar *FVectorNode::tref() const { return gref() + gref_len(); }
+ 
+ const uchar *FVectorNode::get_key(const void *elem, size_t *key_len, my_bool) {
+diff --git a/sql/vidx/vidx_index.cc b/sql/vidx/vidx_index.cc
+index 636d1255ee6..76473a61af5 100644
+--- a/sql/vidx/vidx_index.cc
++++ b/sql/vidx/vidx_index.cc
+@@ -661,7 +661,7 @@ bool delete_table(THD *thd, const dd::Table *dd_table, const char *db_name) {
+   /* 4. remove the "__hlindexes__" option in base dd table. The base dd
+   table may be used later in acquire_uncached_table() to build the base
+   table share */
+-  ((dd::Table *)dd_table)->options().remove("__hlindexes__");
++  const_cast<dd::Table *>(dd_table)->options().remove("__hlindexes__");
+ 
+   /* 5. Drop dd table */
+   return dd::drop_table(thd, db_name, hlindex_name, *hlindex_dd);
+-- 
+2.43.0
+
