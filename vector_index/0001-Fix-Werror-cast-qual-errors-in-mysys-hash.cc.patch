@@ -1,0 +1,115 @@
+From dbc00fbd4c51bbb60cef9e108ae6d3ea44b1df57 Mon Sep 17 00:00:00 2001
+From: Developer <developer@example.com>
+Date: Fri, 24 Apr 2026 15:47:38 +0800
+Subject: [PATCH] Fix -Werror=cast-qual errors in mysys/hash.cc
+
+Remove C-style casts that stripped const qualifiers:
+- my_hash_sort: drop redundant (uchar*) on const uchar* key
+- my_hash_key: return const uchar* instead of char*; remove internal casts
+- rec_hashnr, hashcmp, my_hash_insert, my_hash_update, my_hash_check:
+  update local variables to const uchar* to match new my_hash_key return type
+- my_hash_insert line 463: use const_cast<uchar*> to document intentional
+  const-stripping when storing inserted record pointer in HASH_LINK::data
+---
+ mysys/hash.cc | 31 +++++++++++++++----------------
+ 1 file changed, 15 insertions(+), 16 deletions(-)
+
+diff --git a/mysys/hash.cc b/mysys/hash.cc
+index 3ac66e736ce..68e3bbcd47c 100644
+--- a/mysys/hash.cc
++++ b/mysys/hash.cc
+@@ -45,7 +45,7 @@ static int hashcmp(const HASH *hash, HASH_LINK *pos, const uchar *key,
+ my_hash_value_type my_hash_sort(CHARSET_INFO *cs, const uchar *key,
+                                 size_t length) {
+   ulong nr1 = 1, nr2 = 4;
+-  my_ci_hash_sort(cs, (uchar *)key, length, &nr1, &nr2);
++  my_ci_hash_sort(cs, key, length, &nr1, &nr2);
+   return (my_hash_value_type)nr1;
+ }
+ 
+@@ -176,11 +176,11 @@ void my_hash_reset(HASH *hash) {
+   handle inline functions that are not defined as native types
+ */
+ 
+-static inline char *my_hash_key(const HASH *hash, const uchar *record,
+-                                size_t *length, my_bool first) {
+-  if (hash->get_key) return (char *)(*hash->get_key)(record, length, first);
++static inline const uchar *my_hash_key(const HASH *hash, const uchar *record,
++                                       size_t *length, my_bool first) {
++  if (hash->get_key) return (*hash->get_key)(record, length, first);
+   *length = hash->key_length;
+-  return (char *)record + hash->key_offset;
++  return record + hash->key_offset;
+ }
+ 
+ /* Calculate pos according to keys */
+@@ -205,7 +205,7 @@ static
+     my_hash_value_type
+     rec_hashnr(HASH *hash, const uchar *record) {
+   size_t length;
+-  uchar *key = (uchar *)my_hash_key(hash, record, &length, 0);
++  const uchar *key = my_hash_key(hash, record, &length, 0);
+   return hash->hash_function(hash->charset, key, length);
+ }
+ 
+@@ -332,10 +332,8 @@ static void movelink(HASH_LINK *array, uint find, uint next_link,
+ static int hashcmp(const HASH *hash, HASH_LINK *pos, const uchar *key,
+                    size_t length) {
+   size_t rec_keylength;
+-  uchar *rec_key;
+-  rec_key = (uchar *)my_hash_key(hash, pos->data, &rec_keylength, 1);
+-  return my_strnncoll(hash->charset, (uchar *)rec_key, rec_keylength,
+-                      (uchar *)key, length);
++  const uchar *rec_key = my_hash_key(hash, pos->data, &rec_keylength, 1);
++  return my_strnncoll(hash->charset, rec_key, rec_keylength, key, length);
+ }
+ 
+ /**
+@@ -351,10 +349,11 @@ my_bool my_hash_insert(HASH *info, const uchar *record) {
+   size_t idx, halfbuff, first_index;
+   size_t length;
+   my_hash_value_type current_hash_nr, rec_hash_nr = 0, rec2_hash_nr = 0;
+-  uchar *rec_data = nullptr, *rec2_data = nullptr, *key;
++  uchar *rec_data = nullptr, *rec2_data = nullptr;
++  const uchar *key;
+   HASH_LINK *data, *empty, *gpos = nullptr, *gpos2 = nullptr, *pos;
+ 
+-  key = (uchar *)my_hash_key(info, record, &length, 1);
++  key = my_hash_key(info, record, &length, 1);
+   current_hash_nr = info->hash_function(info->charset, key, length);
+ 
+   if (info->flags & HASH_UNIQUE) {
+@@ -460,7 +459,7 @@ my_bool my_hash_insert(HASH *info, const uchar *record) {
+                (uint)(empty - data));
+     }
+   }
+-  pos->data = (uchar *)record;
++  pos->data = const_cast<uchar *>(record);
+   pos->hash_nr = current_hash_nr;
+   if (++info->records == info->blength) info->blength += info->blength;
+   return (0);
+@@ -572,10 +571,10 @@ my_bool my_hash_update(HASH *hash, uchar *record, uchar *old_key,
+   size_t length, empty, blength;
+   my_hash_value_type hash_nr;
+   HASH_LINK org_link, *data, *previous, *pos;
+-  uchar *new_key;
++  const uchar *new_key;
+   DBUG_ENTER("my_hash_update");
+ 
+-  new_key = (uchar *)my_hash_key(hash, record, &length, 1);
++  new_key = my_hash_key(hash, record, &length, 1);
+   hash_nr = hash->hash_function(hash->charset, new_key, length);
+ 
+   if (HASH_UNIQUE & hash->flags) {
+@@ -724,7 +723,7 @@ my_bool my_hash_check(HASH *hash) {
+ 
+   for (i = found = max_links = seek = 0; i < records; i++) {
+     size_t length;
+-    uchar *key = (uchar *)my_hash_key(hash, data[i].data, &length, 0);
++    const uchar *key = my_hash_key(hash, data[i].data, &length, 0);
+     if (data[i].hash_nr != hash->hash_function(hash->charset, key, length)) {
+       DBUG_PRINT("error", ("record at %d has wrong hash", i));
+       error = 1;
+-- 
+2.43.0
+
