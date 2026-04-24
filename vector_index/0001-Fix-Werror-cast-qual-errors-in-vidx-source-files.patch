@@ -1,0 +1,170 @@
+From 9dbb267e94e19f5c9fa88fdf731790d69f598073 Mon Sep 17 00:00:00 2001
+From: Developer <developer@example.com>
+Date: Fri, 24 Apr 2026 17:25:03 +0800
+Subject: [PATCH] Fix -Werror=cast-qual errors in vidx source files
+
+Remove C-style casts that stripped const qualifiers across all vidx files:
+- vidx_func.h: use static_cast<const Item_func*> for const Item* downcast
+- sql_queue.h: remove const from push/safe_push/replace_top params;
+  use reinterpret_cast/const_cast; fix queue_is_full in const method
+- vidx_hnsw.cc: FVector::data() add non-const overload, fix const overload;
+  FVector::create() const void* src -> const float*;
+  AVX2/AVX512 dot_product v1/v2 -> const __m256i*/const __m512i*;
+  String::ptr() result -> const uchar*; gref() use const_cast
+- bloom_filters.h: masks (const uint8_t[]) read via reinterpret_cast<const>
+- vidx_index.cc: const dd::Table* -> const_cast for options().remove()
+---
+ include/vidx/bloom_filters.h |  2 +-
+ include/vidx/sql_queue.h     | 16 ++++++++--------
+ include/vidx/vidx_func.h     |  2 +-
+ sql/vidx/vidx_hnsw.cc        | 19 +++++++++++--------
+ sql/vidx/vidx_index.cc       |  2 +-
+ 5 files changed, 22 insertions(+), 19 deletions(-)
+
+diff --git a/include/vidx/bloom_filters.h b/include/vidx/bloom_filters.h
+index 53381dab57f..a36a724059b 100644
+--- a/include/vidx/bloom_filters.h
++++ b/include/vidx/bloom_filters.h
+@@ -359,7 +359,7 @@ struct PatternedSimdBloomFilter {
+     uint64_t maskIdx = hash & maskIdxMask;
+     uint64_t maskByteIdx = maskIdx >> 3;
+     uint64_t maskBitIdx = maskIdx & 7;
+-    uint64_t rawMask = *(uint64_t *)(masks + maskByteIdx);
++    uint64_t rawMask = *reinterpret_cast<const uint64_t *>(masks + maskByteIdx);
+     uint64_t unrotated = (rawMask >> maskBitIdx) & maskMask;
+     uint64_t rotation = (hash >> mask_idx_bits) & ((1 << rotate_bits) - 1);
+     return rotation ? (unrotated << rotation) | (unrotated >> (64 - rotation))
+diff --git a/include/vidx/sql_queue.h b/include/vidx/sql_queue.h
+index c980235da5a..0cabc6b5616 100644
+--- a/include/vidx/sql_queue.h
++++ b/include/vidx/sql_queue.h
+@@ -56,27 +56,27 @@ class Queue {
+   int init(uint max_elements, bool max_at_top, queue_compare compare,
+            Param *param = 0) {
+     return init_queue(&m_queue, key_memory_vidx_mem, max_elements, 0,
+-                      max_at_top, compare, (void *)param);
++                      max_at_top, compare, static_cast<void *>(param));
+   }
+ 
+   size_t elements() const { return m_queue.elements; }
+   bool is_inited() const { return is_queue_inited(&m_queue); }
+-  bool is_full() const { return queue_is_full((QUEUE *)(&m_queue)); }
++  bool is_full() const { return queue_is_full(const_cast<QUEUE *>(&m_queue)); }
+   bool is_empty() const { return elements() == 0; }
+   Element *top() const { return (Element *)queue_top(&m_queue); }
+ 
+-  void push(const Element *element) {
+-    queue_insert(&m_queue, (uchar *)element);
++  void push(Element *element) {
++    queue_insert(&m_queue, reinterpret_cast<uchar *>(element));
+   }
+-  void safe_push(const Element *element) {
++  void safe_push(Element *element) {
+     if (is_full()) m_queue.elements--;  // remove one of the furthest elements
+-    queue_insert(&m_queue, (uchar *)element);
++    queue_insert(&m_queue, reinterpret_cast<uchar *>(element));
+   }
+   Element *pop() { return (Element *)queue_remove_top(&m_queue); }
+   void clear() { queue_remove_all(&m_queue); }
+   void propagate_top() { queue_replaced(&m_queue); }
+-  void replace_top(const Element *element) {
+-    queue_top(&m_queue) = (uchar *)element;
++  void replace_top(Element *element) {
++    queue_top(&m_queue) = reinterpret_cast<uchar *>(element);
+     propagate_top();
+   }
+ 
+diff --git a/include/vidx/vidx_func.h b/include/vidx/vidx_func.h
+index e5ac9625ef5..7244effd69e 100644
+--- a/include/vidx/vidx_func.h
++++ b/include/vidx/vidx_func.h
+@@ -125,7 +125,7 @@ class Item_func_vector_dim : public Item_int_func {
+ 
+ static inline bool check_item_func_vec_distance(const Item *item) {
+   return item->type() == Item::FUNC_ITEM &&
+-         ((Item_func *)item)->functype() == Item_func::VECTOR_DISTANCE_FUNC;
++         static_cast<const Item_func *>(item)->functype() == Item_func::VECTOR_DISTANCE_FUNC;
+ }
+ }  // namespace vidx
+ 
+diff --git a/sql/vidx/vidx_hnsw.cc b/sql/vidx/vidx_hnsw.cc
+index 00a751370de..614962b0ab0 100644
+--- a/sql/vidx/vidx_hnsw.cc
++++ b/sql/vidx/vidx_hnsw.cc
+@@ -81,7 +81,8 @@ struct FVector {
+   float abs2, scale;
+   int16_t dims[4];
+ 
+-  uchar *data() const { return (uchar *)(&scale); }
++  uchar *data() { return reinterpret_cast<uchar *>(&scale); }
++  const uchar *data() const { return reinterpret_cast<const uchar *>(&scale); }
+ 
+   static size_t data_size(size_t n) { return data_header + n * 2; }
+ 
+@@ -91,7 +92,8 @@ struct FVector {
+ 
+   static const FVector *create(distance_kind metric, void *mem, const void *src,
+                                size_t src_len) {
+-    float scale = 0, *v = (float *)src;
++    float scale = 0;
++    const float *v = reinterpret_cast<const float *>(src);
+     size_t vec_len = src_len / sizeof(float);
+     for (size_t i = 0; i < vec_len; i++)
+       scale = std::max(scale, std::abs(get_float(v + i)));
+@@ -130,8 +132,8 @@ struct FVector {
+       v8f v;
+       __m256 i;
+     } tmp;
+-    __m256i *p1 = (__m256i *)v1;
+-    __m256i *p2 = (__m256i *)v2;
++    const __m256i *p1 = reinterpret_cast<const __m256i *>(v1);
++    const __m256i *p2 = reinterpret_cast<const __m256i *>(v2);
+     v8f d = {0};
+     for (size_t i = 0; i < (len + AVX2_dims - 1) / AVX2_dims; p1++, p2++, i++) {
+       tmp.i = _mm256_cvtepi32_ps(_mm256_madd_epi16(*p1, *p2));
+@@ -164,8 +166,8 @@ struct FVector {
+ 
+   AVX512_IMPLEMENTATION
+   static float dot_product(const int16_t *v1, const int16_t *v2, size_t len) {
+-    __m512i *p1 = (__m512i *)v1;
+-    __m512i *p2 = (__m512i *)v2;
++    const __m512i *p1 = reinterpret_cast<const __m512i *>(v1);
++    const __m512i *p2 = reinterpret_cast<const __m512i *>(v2);
+     __m512 d = _mm512_setzero_ps();
+     for (size_t i = 0; i < (len + AVX512_dims - 1) / AVX512_dims;
+          p1++, p2++, i++)
+@@ -1089,7 +1091,8 @@ int FVectorNode::load_from_record(TABLE *graph) {
+   if (unlikely(!v)) return HA_ERR_CRASHED;
+ 
+   // <N> <gref> <gref> ... <N> ...etc...
+-  uchar *ptr = (uchar *)v->ptr(), *end = ptr + v->length();
++  const uchar *ptr = reinterpret_cast<const uchar *>(v->ptr());
++  const uchar *end = ptr + v->length();
+   for (size_t i = 0; i <= max_layer; i++) {
+     if (unlikely(ptr >= end)) return HA_ERR_CRASHED;
+     size_t grefs = *ptr++;
+@@ -1109,7 +1112,7 @@ void FVectorNode::push_neighbor(size_t layer, FVectorNode *other) {
+ 
+ size_t FVectorNode::tref_len() const { return ctx->tref_len; }
+ size_t FVectorNode::gref_len() const { return ctx->gref_len; }
+-uchar *FVectorNode::gref() const { return (uchar *)(this + 1); }
++uchar *FVectorNode::gref() const { return const_cast<uchar *>(reinterpret_cast<const uchar *>(this + 1)); }
+ uchar *FVectorNode::tref() const { return gref() + gref_len(); }
+ 
+ const uchar *FVectorNode::get_key(const void *elem, size_t *key_len, my_bool) {
+diff --git a/sql/vidx/vidx_index.cc b/sql/vidx/vidx_index.cc
+index 636d1255ee6..76473a61af5 100644
+--- a/sql/vidx/vidx_index.cc
++++ b/sql/vidx/vidx_index.cc
+@@ -661,7 +661,7 @@ bool delete_table(THD *thd, const dd::Table *dd_table, const char *db_name) {
+   /* 4. remove the "__hlindexes__" option in base dd table. The base dd
+   table may be used later in acquire_uncached_table() to build the base
+   table share */
+-  ((dd::Table *)dd_table)->options().remove("__hlindexes__");
++  const_cast<dd::Table *>(dd_table)->options().remove("__hlindexes__");
+ 
+   /* 5. Drop dd table */
+   return dd::drop_table(thd, db_name, hlindex_name, *hlindex_dd);
+-- 
+2.43.0
+
