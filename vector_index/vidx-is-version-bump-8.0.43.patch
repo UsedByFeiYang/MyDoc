@@ -1,0 +1,88 @@
+From: AliSQL vector backport
+Subject: [PATCH] Bump IS_DD_VERSION and ignore versioned comments in I_S DATA_TYPE
+
+Vector columns are stored with their type wrapped in
+"/*!99999 vector(N) */ varbinary(N*4)". Without stripping the versioned
+comment prefix, the I_S views surface DATA_TYPE as "/*!99999" instead of
+the underlying physical type.
+
+Apply the same SUBSTRING_INDEX("..., '*/ ', -1") prefix-stripping to
+INFORMATION_SCHEMA.PARAMETERS / ROUTINES that columns.cc already uses,
+and bump IS_DD_VERSION so the change propagates on upgrades from older
+data directories.
+
+---
+ sql/dd/impl/system_views/parameters.cc |  6 ++++--
+ sql/dd/impl/system_views/routines.cc   |  5 +++--
+ sql/dd/info_schema/metadata.h          | 13 ++++++++++---
+ 3 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/sql/dd/impl/system_views/parameters.cc b/sql/dd/impl/system_views/parameters.cc
+--- a/sql/dd/impl/system_views/parameters.cc
++++ b/sql/dd/impl/system_views/parameters.cc
+@@ -48,9 +48,11 @@ Parameters::Parameters() {
+   m_target_def.add_field(FIELD_PARAMETER_NAME, "PARAMETER_NAME",
+                          "IF (rtn.type = 'FUNCTION' AND prm.ordinal_position = "
+                          "1, NULL, prm.name)");
++  // Ignore versioned comments, e.g. for vector type display strings.
+   m_target_def.add_field(
+       FIELD_DATA_TYPE, "DATA_TYPE",
+-      "SUBSTRING_INDEX(SUBSTRING_INDEX(prm.data_type_utf8, '(', 1), ' ', 1)");
++      "SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(prm.data_type_utf8,"
++      " '*/ ', -1), '(', 1), ' ', 1)");
+   m_target_def.add_field(
+       FIELD_CHARACTER_MAXIMUM_LENGTH, "CHARACTER_MAXIMUM_LENGTH",
+       "INTERNAL_DD_CHAR_LENGTH(prm.data_type, prm.char_length, col.name, 0)");
+diff --git a/sql/dd/impl/system_views/routines.cc b/sql/dd/impl/system_views/routines.cc
+--- a/sql/dd/impl/system_views/routines.cc
++++ b/sql/dd/impl/system_views/routines.cc
+@@ -43,8 +43,9 @@ Routines::Routines() {
+   m_target_def.add_field(FIELD_ROUTINE_TYPE, "ROUTINE_TYPE", "rtn.type");
+   m_target_def.add_field(FIELD_DATA_TYPE, "DATA_TYPE",
+                          "IF(rtn.type = 'PROCEDURE', '', "
+-                         "   SUBSTRING_INDEX(SUBSTRING_INDEX("
+-                         "     rtn.result_data_type_utf8, '(', 1), ' ', 1))");
++                         "   SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX("
++                         "     rtn.result_data_type_utf8, '*/ ', -1), "
++                         "     '(', 1), ' ', 1))");
+   m_target_def.add_field(FIELD_CHARACTER_MAXIMUM_LENGTH,
+                          "CHARACTER_MAXIMUM_LENGTH",
+                          "INTERNAL_DD_CHAR_LENGTH(rtn.result_data_type,"
+diff --git a/sql/dd/info_schema/metadata.h b/sql/dd/info_schema/metadata.h
+--- a/sql/dd/info_schema/metadata.h
++++ b/sql/dd/info_schema/metadata.h
+@@ -219,7 +219,7 @@ namespace info_schema {
+   - Bug#33781534: INFORMATION_SCHEMA.KEY_COLUMN_USAGE table is modified to
+                   list invisible columns with key constraints.
+
+-  80030: Current.
++  80030..80042: Not published.
+   ------------------------------------
+   Changes from version 80029:
+   - Bug #33787300 Rename utf8_xxx collations to utf8mb3_xxx
+@@ -234,12 +234,20 @@ namespace info_schema {
+                 INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+                 INFORMATION_SCHEMA.TABLE_CONSTRAINTS_EXTENSIONS
+
+-  80031: Next IS version number after the previous is public.
++  80043: Current.
+   ------------------------------------
+   Changes from version 80030:
++  - AliSQL vector data types wrapped in /*!99999 ... */ versioned comments
++    are ignored when deriving INFORMATION_SCHEMA.COLUMNS.DATA_TYPE,
++    INFORMATION_SCHEMA.PARAMETERS.DATA_TYPE and
++    INFORMATION_SCHEMA.ROUTINES.DATA_TYPE.
++
++  80044: Next IS version number after the previous is public.
++  ------------------------------------
++  Changes from version 80043:
+ */
+
+-static const uint IS_DD_VERSION = 80030;
++static const uint IS_DD_VERSION = 80043;
+ static_assert((IS_DD_VERSION <= MYSQL_VERSION_ID) ||
+                   ((IS_DD_VERSION == 800201) && (MYSQL_VERSION_ID >= 80020)),
+               "This release can not use a version number from the future");
+--
+2.34.1
+
